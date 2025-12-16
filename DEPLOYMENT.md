@@ -166,7 +166,59 @@ Test the backend from the VPS:
 curl http://127.0.0.1:8001/
 ```
 
-If you see HTML or any response (not an error like “connection refused”), the backend is running.
+If you see HTML or any response (not an error like "connection refused"), the backend is running.
+
+### 5.1. Fix Static Files Permissions (if needed)
+
+If you see permission errors in the logs about `/app/staticfiles`, fix them:
+
+1. **Create the static directory on the host** (if it doesn't exist):
+
+   ```bash
+   mkdir -p ~/Registration/backend/static
+   ```
+
+2. **Fix permissions** (choose one method):
+
+   **Option A - Make it writable by everyone** (simpler, less secure):
+
+   ```bash
+   chmod 777 ~/Registration/backend/static
+   ```
+
+   **Option B - Match container user UID** (more secure):
+
+   ```bash
+   # Find the appuser UID inside the container
+   docker exec django-docker id appuser
+   
+   # Then set ownership (replace 1000 with actual UID if different)
+   sudo chown -R 1000:1000 ~/Registration/backend/static
+   chmod -R 755 ~/Registration/backend/static
+   ```
+
+3. **Fix permissions inside the container**:
+
+   ```bash
+   docker exec -u root django-docker sh -c "chown -R appuser:appuser /app/staticfiles && chmod -R 755 /app/staticfiles"
+   ```
+
+4. **Restart containers**:
+
+   ```bash
+   docker compose down
+   docker compose up -d
+   ```
+
+5. **Check logs** to verify static files collected successfully:
+
+   ```bash
+   docker logs django-docker --tail 30
+   ```
+
+   You should see: `"X static files copied to '/app/staticfiles'."` without permission errors.
+
+> **Note**: The `entrypoint.prod.sh` script already includes `mkdir -p /app/staticfiles` to create the directory automatically. The permission fix above ensures it's writable.
 
 ---
 
@@ -227,6 +279,112 @@ http://tilakapi.enlightbook.com
 ```
 
 You should see your Django app (over HTTP).
+
+### 6.1. Testing Your Deployment
+
+Use these commands to verify everything is working:
+
+#### Test 1: Check containers are running
+
+```bash
+docker ps
+```
+
+You should see `django-docker`, `frontend-proxy`, and `db` containers running.
+
+#### Test 2: Check Django logs
+
+```bash
+docker logs django-docker --tail 30
+```
+
+Look for:
+- ✅ `"X static files copied to '/app/staticfiles'."` (static files collected)
+- ✅ `"No migrations to apply."` or migration messages (database ready)
+- ✅ `"Starting gunicorn"` and `"Listening at: http://0.0.0.0:8000"` (server running)
+- ❌ No `PermissionError` or `SECRET_KEY` errors
+
+#### Test 3: Verify environment variables
+
+```bash
+# Check ALLOWED_HOSTS is set correctly
+docker exec django-docker env | grep DJANGO_ALLOWED_HOSTS
+
+# Check SECRET_KEY is set (should show a long string)
+docker exec django-docker env | grep DJANGO_SECRET_KEY
+
+# Check what Django actually sees for ALLOWED_HOSTS
+docker exec django-docker python manage.py shell -c "from django.conf import settings; print('ALLOWED_HOSTS:', settings.ALLOWED_HOSTS)"
+```
+
+#### Test 4: Test backend directly (bypass Nginx)
+
+```bash
+# Test from VPS itself
+curl http://127.0.0.1:8001/
+
+# Test with Host header (simulates Nginx forwarding)
+curl -H "Host: tilakapi.enlightbook.com" http://127.0.0.1:8001/
+```
+
+Both should return HTML or JSON (not "DisallowedHost" error).
+
+#### Test 5: Test through Nginx (from VPS)
+
+```bash
+# Test via Nginx
+curl http://127.0.0.1/
+
+# Or test with the domain (if DNS is working)
+curl http://tilakapi.enlightbook.com/
+```
+
+#### Test 6: Test from your local computer
+
+```bash
+# Test DNS resolution
+ping tilakapi.enlightbook.com
+
+# Test HTTP connection
+curl http://tilakapi.enlightbook.com/
+
+# Or open in browser:
+# http://tilakapi.enlightbook.com
+```
+
+#### Test 7: Check Nginx configuration
+
+```bash
+# Verify Nginx config syntax
+sudo nginx -t
+
+# Check Nginx is forwarding to correct port
+cat /etc/nginx/sites-available/tilakapi.enlightbook.com | grep proxy_pass
+# Should show: proxy_pass http://127.0.0.1:8001; (or your chosen port)
+
+# Check Nginx error logs if something fails
+sudo tail -f /var/log/nginx/error.log
+```
+
+#### Test 8: Verify database connection (if using PostgreSQL)
+
+```bash
+# Check if Django can connect to Postgres
+docker exec django-docker python manage.py dbshell
+
+# Or check Postgres container logs
+docker logs <postgres-container-name> --tail 20
+```
+
+#### Common Issues and Quick Fixes
+
+| Error | Solution |
+|-------|----------|
+| `DisallowedHost at /` | Check `DJANGO_ALLOWED_HOSTS` in `.env.prod` includes your domain, then restart containers |
+| `SECRET_KEY setting must not be empty` | Make sure `.env.prod` has `DJANGO_SECRET_KEY=...` (not `SECRET_KEY=`) |
+| `Permission denied: '/app/staticfiles'` | Run the permission fix commands in section 5.1 above |
+| `Connection refused` on port 8001 | Check `docker ps` - container might not be running, or port might be wrong in Nginx config |
+| `502 Bad Gateway` | Check Nginx `proxy_pass` points to correct port (8001 or your chosen port) |
 
 ---
 
@@ -333,18 +491,29 @@ nano .env.prod
 Add lines like (choose your own secure values):
 
 ```env
+# For PostgreSQL container (used by docker-compose)
 POSTGRES_DB=registration_db
 POSTGRES_USER=registration_user
 POSTGRES_PASSWORD=super_secret_password
-POSTGRES_HOST=db
-POSTGRES_PORT=5432
+
+# For Django to connect to PostgreSQL (MUST match POSTGRES_* above)
+DB_NAME=registration_db
+DB_USER=registration_user
+DB_PASSWORD=super_secret_password
+DB_HOST=db
+DB_PORT=5432
 ```
+
+> **Important**: 
+> - `DB_HOST` must be exactly `db` (the service name in docker-compose.yml)
+> - `DB_PORT` must be `5432` (PostgreSQL's default port **inside the container**)
+> - If port 5432 is busy on your **host VPS**, you can change the host port mapping in `docker-compose.yml` to something like `"5433:5432"`, but Django still uses `5432` because it connects **inside Docker's network**, not from the host.
 
 Save and exit.
 
 ### 9.3. Update Django `DATABASES` (requires a code change)
 
-> This step **changes code**, so do it only when you’re ready or ask a developer.  
+> This step **changes code**, so do it only when you're ready or ask a developer.  
 > Shown here just so you know what it will look like.
 
 In `backend/config/settings.py`, replace the `DATABASES` section with something like:
@@ -353,14 +522,16 @@ In `backend/config/settings.py`, replace the `DATABASES` section with something 
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("POSTGRES_DB"),
-        "USER": os.getenv("POSTGRES_USER"),
-        "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
-        "HOST": os.getenv("POSTGRES_HOST", "db"),
-        "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        "NAME": os.getenv("DB_NAME"),
+        "USER": os.getenv("DB_USER"),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+        "HOST": os.getenv("DB_HOST", "db"),
+        "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
 ```
+
+> **Note**: Make sure the env var names (`DB_NAME`, `DB_USER`, etc.) match what you put in `.env.prod` (section 9.2).
 
 Commit/push this change and redeploy (or edit directly on the server if you know what you’re doing).
 
