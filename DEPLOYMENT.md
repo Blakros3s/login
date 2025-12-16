@@ -448,15 +448,88 @@ If you want to also run the **Next.js frontend** on the same VPS using Docker:
    docker build -t registration-frontend .
    ```
 
-4. Run the frontend container (example on port 3000):
+4. Run the frontend container (using port 3003 on host):
 
    ```bash
-   docker run -d --name registration-frontend -p 3000:3000 registration-frontend
+   docker run -d --name registration-frontend -p 3003:3000 registration-frontend
    ```
 
-5. You can then:
-   - Visit `http://YOUR_VPS_IP:3000` directly, or
-   - Add another Nginx config (like `app.enlightbook.com`) to proxy to `127.0.0.1:3000`.
+   Or if using `docker-compose.yml` in the frontend folder:
+
+   ```bash
+   cd ~/Registration/frontend
+   docker compose up --build -d
+   ```
+
+5. **Configure Nginx for `tilak.enlightbook.com`**:
+
+   On the VPS, create the Nginx config file:
+
+   ```bash
+   sudo nano /etc/nginx/sites-available/tilak.enlightbook.com
+   ```
+
+   Paste this configuration:
+
+   ```nginx
+   server {
+       listen 80;
+       listen [::]:80;
+       server_name tilak.enlightbook.com;
+
+       location / {
+           proxy_pass http://127.0.0.1:3003;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           
+           # WebSocket support (if your Next.js app uses it)
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection "upgrade";
+       }
+   }
+   ```
+
+   Save and exit (`Ctrl + O`, Enter, `Ctrl + X`).
+
+   Enable the site:
+
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/tilak.enlightbook.com /etc/nginx/sites-enabled/tilak.enlightbook.com
+   ```
+
+   Test Nginx config:
+
+   ```bash
+   sudo nginx -t
+   ```
+
+   If successful, reload Nginx:
+
+   ```bash
+   sudo systemctl reload nginx
+   ```
+
+6. **Add DNS record for frontend**:
+
+   Go to your domain provider and add another **A record**:
+   - **Name / Host**: `tilak`
+   - **Type**: `A`
+   - **Value**: `YOUR_VPS_PUBLIC_IP` (same IP as backend)
+
+7. **Add HTTPS (optional)**:
+
+   ```bash
+   sudo certbot --nginx -d tilak.enlightbook.com
+   ```
+
+8. **Test your frontend**:
+
+   Visit `http://tilak.enlightbook.com` (or `https://` if you set up SSL).
+
+   Your frontend should now be accessible at `tilak.enlightbook.com` and will communicate with your backend at `tilakapi.enlightbook.com`.
 
 ---
 
