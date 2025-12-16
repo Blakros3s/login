@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build: .
+    container_name: registration-frontend
+    ports:
+      # Host port 3003 -> container port 3000 (from Dockerfile)
+      - "3003:3000"
+    env_file:
+      # Optional: create a .env file in this folder if you need variables
+      - .env
+
+
