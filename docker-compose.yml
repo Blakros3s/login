@@ -3,7 +3,7 @@ services:
     image: postgres:17
     ports:
       # Expose Postgres on the host (optional – you can remove this if you don't need direct DB access)
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     env_file:
